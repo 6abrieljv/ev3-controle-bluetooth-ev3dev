@@ -1,0 +1,17 @@
+[Unit]
+Description=EV3 main controller
+After=multi-user.target bluetooth.target
+Conflicts=brickman.service
+Before=brickman.service
+Wants=bluetooth.target
+
+[Service]
+Type=simple
+User=robot
+WorkingDirectory=/home/robot
+ExecStart=/home/robot/start_main.sh
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
