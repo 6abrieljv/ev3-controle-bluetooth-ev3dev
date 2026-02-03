@@ -19,6 +19,12 @@ sudo apt-get update
 sudo apt-get install -y python3-ev3dev2 python3-evdev python3-pil
 ```
 
+## 💾 Preparar SD (resumo)
+
+1) Baixe a imagem do EV3dev para EV3.
+2) Grave no cartao SD com o balenaEtcher.
+3) Coloque no EV3 e ligue.
+
 ## 🔐 Acesso SSH
 
 - Usuario: `robot`
