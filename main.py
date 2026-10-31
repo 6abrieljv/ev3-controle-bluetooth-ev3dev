@@ -144,6 +144,23 @@ def _load_font(size, bold=False):
         return None
 
 
+KDSETMODE, KD_TEXT, KD_GRAPHICS = 0x4B3A, 0, 1
+
+
+def _console_grafico(ligar):
+    """Tira o console de texto do Linux da tela (igual o brickman faz),
+    senao ele escreve por cima do menu. Precisa de root."""
+    try:
+        import fcntl
+        fd = os.open("/dev/tty0", os.O_RDWR)
+        try:
+            fcntl.ioctl(fd, KDSETMODE, KD_GRAPHICS if ligar else KD_TEXT)
+        finally:
+            os.close(fd)
+    except Exception as e:
+        print("Console: {}".format(e))
+
+
 class Tela(object):
     def __init__(self):
         self.disp = None
@@ -155,6 +172,12 @@ class Tela(object):
         except Exception as e:
             print("Sem display: {}".format(e))
             self.disp = None
+        # ev3dev2 usa xres/yres; outras versoes usam width/height
+        d = self.disp
+        self.W = getattr(d, "xres", None) or getattr(d, "width", None) or 178
+        self.H = getattr(d, "yres", None) or getattr(d, "height", None) or 128
+        if d is not None:
+            _console_grafico(True)
         self.font = _load_font(12)
         self.bold = _load_font(13, bold=True)
         self.lh = self._h(self.font) + 4
@@ -188,18 +211,17 @@ class Tela(object):
     def _begin(self, titulo):
         d = self.disp
         draw = d.draw
-        draw.rectangle((0, 0, d.width, d.height), fill="white")
-        draw.rectangle((0, 0, d.width, self.th), fill="black")
-        self._text(draw, (3, 1), self._fit(titulo, self.bold, d.width - 6), self.bold, "white")
+        draw.rectangle((0, 0, self.W, self.H), fill="white")
+        draw.rectangle((0, 0, self.W, self.th), fill="black")
+        self._text(draw, (3, 1), self._fit(titulo, self.bold, self.W - 6), self.bold, "white")
         return draw
 
     def _rodape(self, draw, rodape):
         if not rodape:
             return
-        d = self.disp
-        y = d.height - self.lh + 1
-        draw.line((0, y - 1, d.width, y - 1), fill="black")
-        self._text(draw, (2, y), self._fit(rodape, self.font, d.width - 4), self.font, "black")
+        y = self.H - self.lh + 1
+        draw.line((0, y - 1, self.W, y - 1), fill="black")
+        self._text(draw, (2, y), self._fit(rodape, self.font, self.W - 4), self.font, "black")
 
     def mostrar(self, titulo, linhas, rodape=None):
         if self.disp is None:
@@ -209,7 +231,7 @@ class Tela(object):
             draw = self._begin(titulo)
             y = self.th + 3
             for ln in linhas:
-                self._text(draw, (3, y), self._fit(ln, self.font, self.disp.width - 6), self.font, "black")
+                self._text(draw, (3, y), self._fit(ln, self.font, self.W - 6), self.font, "black")
                 y += self.lh
             self._rodape(draw, rodape)
             self.disp.update()
@@ -224,16 +246,16 @@ class Tela(object):
         try:
             d = self.disp
             draw = self._begin(titulo)
-            area = d.height - self.th - 2 - (self.lh if rodape else 0)
+            area = self.H - self.th - 2 - (self.lh if rodape else 0)
             vis = max(1, area // self.lh)
             top = 0
             if sel >= vis:
                 top = sel - vis + 1
             y = self.th + 2
             for i in range(top, min(len(itens), top + vis)):
-                txt = self._fit(itens[i], self.font, d.width - 14)
+                txt = self._fit(itens[i], self.font, self.W - 14)
                 if i == sel:
-                    draw.rectangle((0, y, d.width, y + self.lh), fill="black")
+                    draw.rectangle((0, y, self.W, y + self.lh), fill="black")
                     self._text(draw, (2, y + 1), ">", self.font, "white")
                     self._text(draw, (14, y + 1), txt, self.font, "white")
                 else:
@@ -1058,6 +1080,7 @@ def main():
     finally:
         parar_tudo()
         tela.mostrar("Encerrado", [])
+        _console_grafico(False)
 
 
 if __name__ == "__main__":
