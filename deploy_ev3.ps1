@@ -35,6 +35,9 @@ if [ -f /home/$USER/start_main.sh ]; then
   sudo chown $USER:$USER /home/$USER/start_main.sh
   sudo chmod +x /home/$USER/start_main.sh
 fi
+# o menu deste programa substitui o brickman no boot
+# (o brickman continua disponivel pela opcao 'Brickman' do menu)
+sudo systemctl disable brickman.service
 # reload and enable service
 sudo systemctl daemon-reload
 sudo systemctl enable ev3main.service

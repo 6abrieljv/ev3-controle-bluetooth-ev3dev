@@ -7,7 +7,9 @@ Wants=bluetooth.target
 
 [Service]
 Type=simple
-User=robot
+# roda como root: precisa parear Bluetooth, abrir o brickman e desligar
+User=root
+Environment=PYTHONUNBUFFERED=1
 WorkingDirectory=/home/robot
 ExecStart=/home/robot/start_main.sh
 Restart=on-failure

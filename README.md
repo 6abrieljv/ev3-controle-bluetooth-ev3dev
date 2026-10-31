@@ -1,17 +1,36 @@
 # 🤖 EV3 - Controle Bluetooth com EV3dev
 
-Controle motores do EV3 com controle Bluetooth ou USB (PS3, PS4, Xbox, etc). O
-programa roda como servico systemd, reconhece o controle sozinho e, se ele
-desconectar, para os motores e espera ele voltar.
+Controle motores do EV3 com controle Bluetooth ou USB (PS4, PS3, Xbox, etc). O
+programa roda como servico systemd e mostra um menu na tela do EV3: da para
+parear o controle e dirigir usando so os botoes do bloco.
 
-## 🎮 Comandos
+## 🖥️ Menu na tela do EV3
+
+Ligou o EV3, o menu aparece sozinho. Tudo pelos botoes do bloco:
+**CIMA/BAIXO** escolhe, **ENTER** abre, **VOLTAR** volta/cancela.
+
+| Opcao | O que faz |
+|---|---|
+| **Dirigir** | usa o controle conectado (aperte PS no controle) |
+| **Parear PS4** | segure SHARE + PS no controle e o EV3 pareia sozinho |
+| **Parear PS3** | ligue o controle no USB, tire o cabo e aperte PS |
+| **Info** | IP, bateria e controle conectado |
+| **Brickman** | abre o menu normal do ev3dev (reinicie o EV3 para voltar) |
+| **Desligar** | desliga o EV3 |
+
+O rodape do menu mostra se tem controle conectado.
+
+## 🎮 Dirigindo
 
 | Controle | Acao |
 |---|---|
 | Analogico esquerdo CIMA/BAIXO | frente / re |
 | Analogico esquerdo ESQ/DIR | vira |
-| **X** (PS4), igual ao original | encerra o programa |
-| Segurar **START** 1 s e soltar (PS3) | encerra o programa |
+| **X** (PS4) | volta ao menu |
+| Segurar **START** 1 s e soltar (PS3) | volta ao menu |
+| **VOLTAR** no EV3 | volta ao menu |
+
+Se o controle desconectar, o robo para e espera ele voltar (aperte PS).
 
 Motores: **B** = esquerdo, **C** = direito (mude `MOTOR_LEFT`/`MOTOR_RIGHT` no
 `main.py`). Se andar ao contrario, use `INVERT_THROTTLE` / `INVERT_TURN`.
@@ -31,9 +50,12 @@ sudo apt-get update
 sudo apt-get install -y python3-ev3dev2 python3-evdev python3-pil
 ```
 
-## 🎮 Parear o controle de PS4 (so na primeira vez)
+## 🎮 Parear pelo terminal/Brickman (alternativa)
 
-O PS4 pareia pelo Bluetooth normal:
+O jeito facil e pelo menu (**Parear PS4** / **Parear PS3**). Se preferir:
+
+### PS4
+
 
 1. Se o programa estiver rodando: `sudo systemctl start brickman`
 2. No controle, segure **SHARE + PS** ate a luz piscar rapido (duas piscadas
@@ -58,12 +80,12 @@ sudo systemctl start ev3main.service
 ```
 No cabo USB tambem funciona, sem parear.
 
-## 🎮 Parear o controle de PS3 (so na primeira vez)
+### PS3
 
 O DualShock 3 nao pareia pela busca normal do Bluetooth: ele precisa ser ligado
 no cabo uma vez para gravar o endereco do EV3.
 
-### Pelo menu do EV3 (Brickman)
+#### Pelo Brickman
 
 1. Pare o programa e volte o Brickman:
    ```
@@ -79,7 +101,7 @@ no cabo uma vez para gravar o endereco do EV3.
 6. Reinicie o EV3 (`sudo reboot`). Pronto: dai pra frente e so ligar o EV3 e
    apertar **PS**.
 
-### Pelo terminal (bluetoothctl)
+#### Pelo terminal (bluetoothctl)
 
 ```
 sudo systemctl stop ev3main.service
@@ -148,9 +170,10 @@ No EV3:
 sed -i 's/\r$//' /home/robot/*.sh /home/robot/*.py /home/robot/ev3main.service
 sudo chmod +x /home/robot/start_main.sh
 sudo cp /home/robot/ev3main.service /etc/systemd/system/ev3main.service
+sudo systemctl disable brickman
 sudo systemctl daemon-reload
 sudo systemctl enable ev3main.service
-sudo systemctl start ev3main.service
+sudo systemctl restart ev3main.service
 ```
 
 ## 🧰 Deploy com script
@@ -166,22 +189,13 @@ scp .\main.py robot@ev3dev:/home/robot/main.py
 ssh -t robot@ev3dev "sudo systemctl restart ev3main.service"
 ```
 
-## 🖥️ Interface no LCD
-
-- Sem controle conectado, a tela mostra "PS3: aperte PS".
-- Quando um controle e reconhecido, ele e usado direto (`AUTO_SELECT = True`).
-- **ENTER** abre o menu para escolher o dispositivo na mao:
-  **CIMA/BAIXO** muda, **ENTER** confirma.
-
 ## 🧱 Brickman
 
+O deploy desativa o brickman no boot para o menu aparecer sozinho. Ele continua
+disponivel pela opcao **Brickman** do menu. Para voltar ao comportamento antigo:
 ```
-sudo systemctl stop brickman
-```
-
-Para voltar:
-```
-sudo systemctl start brickman
+sudo systemctl enable brickman
+sudo systemctl disable ev3main.service
 ```
 
 ## 🧪 Logs

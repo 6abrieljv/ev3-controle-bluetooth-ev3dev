@@ -1,17 +1,30 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Controle do EV3 (ev3dev) por gamepad Bluetooth ou USB.
+EV3 (ev3dev) + controle PS4 / PS3 / Xbox, com MENU na tela do EV3.
 
-Suporta PS3 (DualShock 3 / Sixaxis), PS4, Xbox e controles genericos.
-- Analogico esquerdo: CIMA/BAIXO acelera, ESQ/DIR vira (arcade drive).
-- Encerrar: PS4 = aperte X (igual ao original) | PS3 = segure START 1 s e solte.
-- Se o controle desconectar, os motores param e o programa espera ele voltar
-  (e so apertar o botao PS de novo).
+Liga o EV3 e o menu aparece sozinho. Use so os botoes do bloco:
+  CIMA/BAIXO = escolhe   ENTER = abre   VOLTAR = volta/cancela
+
+Opcoes:
+  Dirigir      - usa o controle (analogico esquerdo)
+  Parear PS4   - pareia um controle de PS4 novo (SHARE + PS)
+  Parear PS3   - pareia um controle de PS3 (cabo USB uma vez)
+  Info         - IP, bateria e controle conectado
+  Brickman     - abre o menu normal do ev3dev
+  Desligar     - desliga o EV3
+
+Dirigindo: PS4 = X volta ao menu | PS3 = segure START 1 s | EV3 = VOLTAR.
 
 Compativel com Python 3.5 (ev3dev stretch): NAO usar f-strings.
 """
 
+import os
+import queue
+import re
+import select
+import signal
+import subprocess
 import sys
 import threading
 import time
@@ -32,13 +45,12 @@ except Exception:
 # =====================================================================
 # Configuracao
 # =====================================================================
-DEBUG_EVENT = False      # imprime eventos brutos (e mostra no LCD)
-AUTO_SELECT = True       # entra direto no controle quando reconhece um
+DEBUG_EVENT = False      # imprime eventos brutos do controle
 DEADZONE = 100           # zona morta do analogico (escala -1000..1000)
 MAX_SPEED = 1000         # speed_sp maximo (LargeMotor aguenta ~1050)
 INVERT_THROTTLE = False  # inverta se o robo andar para tras ao empurrar pra cima
 INVERT_TURN = False      # inverta se virar para o lado errado
-QUIT_HOLD_S = 1.0        # tempo segurando o botao de sair
+QUIT_HOLD_S = 1.0        # PS3: tempo segurando START para voltar ao menu
 
 MOTOR_RIGHT = ev3.OUTPUT_C
 MOTOR_LEFT = ev3.OUTPUT_B
@@ -47,30 +59,21 @@ MOTOR_LEFT = ev3.OUTPUT_B
 BTN_SOUTH, BTN_EAST, BTN_NORTH, BTN_WEST = 304, 305, 307, 308
 BTN_SELECT, BTN_START, BTN_MODE = 314, 315, 316
 
-# Perfis de controle. Os eixos do analogico esquerdo (ABS_X=0 / ABS_Y=1)
-# sao iguais em todos; o que muda entre eles sao os codigos dos botoes.
+# Botao que volta ao menu, por controle. hold=0 -> na hora; >0 -> segurar.
 PROFILES = {
-    # PS3 no kernel do ev3dev stretch (hid-sony com mapeamento padrao):
-    # X=304  O=305  Triangulo=307  Quadrado=308  L1=310 R1=311
-    # L2=312 R2=313 SELECT=314 START=315 PS=316
-    # Analogico direito: ABS_RX=3 / ABS_RY=4 ; gatilhos L2/R2: ABS_Z=2 / ABS_RZ=5
-    "ps3": {"label": "PS3", "quit": [BTN_START], "hold": QUIT_HOLD_S},
-
-    # PS3 em kernels antigos (ev3dev jessie): X=302 O=301 Triangulo=300
-    # Quadrado=303 SELECT=288 START=291 ; analogico direito ABS_Z=2 / ABS_RZ=5
-    "ps3_old": {"label": "PS3 (antigo)", "quit": [291], "hold": QUIT_HOLD_S},
-
-    # PS4 igual ao repositorio original: apertou X, para na hora.
-    # Kernel novo (stretch): X=304 O=305 Triangulo=307 Quadrado=308
-    #   SHARE=314 OPTIONS=315 PS=316
-    "ps4": {"label": "PS4", "quit": [BTN_SOUTH], "hold": 0},
-
-    # Kernel antigo: Quadrado=304 X=305 O=306 Triangulo=307 (o 305 do codigo
-    # original era o X por causa deste mapeamento)
-    "ps4_old": {"label": "PS4 (antigo)", "quit": [305], "hold": 0},
-
-    # Xbox / genericos: mantem o botao 305 do codigo original
-    "generic": {"label": "Generico", "quit": [BTN_EAST], "hold": 0},
+    # PS3 kernel novo: X=304 O=305 Tri=307 Quad=308 SELECT=314 START=315 PS=316
+    "ps3": {"label": "PS3", "quit": [BTN_START], "hold": QUIT_HOLD_S,
+            "dica": "Segure START"},
+    # PS3 kernel antigo: X=302 O=301 Tri=300 Quad=303 SELECT=288 START=291
+    "ps3_old": {"label": "PS3", "quit": [291], "hold": QUIT_HOLD_S,
+                "dica": "Segure START"},
+    # PS4 kernel novo: X=304 O=305 Tri=307 Quad=308 SHARE=314 OPTIONS=315
+    "ps4": {"label": "PS4", "quit": [BTN_SOUTH], "hold": 0, "dica": "X = menu"},
+    # PS4 kernel antigo: Quad=304 X=305 O=306 Tri=307 (o 305 do codigo original)
+    "ps4_old": {"label": "PS4", "quit": [305], "hold": 0, "dica": "X = menu"},
+    # Xbox / genericos
+    "generic": {"label": "Controle", "quit": [BTN_EAST], "hold": 0,
+                "dica": "B = menu"},
 }
 
 
@@ -86,14 +89,13 @@ def scale(val, src, dst):
 
 
 def scale_axis(value, rng):
-    """Converte o valor bruto do eixo para -1000..1000 usando a faixa real
-    do controle (PS3/PS4: 0..255, Xbox: -32768..32767)."""
+    """Valor bruto do eixo -> -1000..1000, usando a faixa real do controle
+    (PS3/PS4: 0..255, Xbox: -32768..32767)."""
     if rng is None:
         rng = (0, 255)
     if rng[1] == rng[0]:
         return 0
-    v = scale(value, rng, (-1000, 1000))
-    v = clamp(v, -1000, 1000)
+    v = clamp(scale(value, rng, (-1000, 1000)), -1000, 1000)
     if -DEADZONE < v < DEADZONE:
         return 0
     return int(v)
@@ -115,196 +117,230 @@ def _beep():
         pass
 
 
-# =====================================================================
-# LCD
-# =====================================================================
-_display = None
-_font = None
-_line_height = 12
-_font_size = 16
-
-
-def _init_display():
-    global _display
-    if _display is not None:
-        return _display
+def _run(cmd, timeout=10):
+    """Roda um comando e devolve a saida (texto). Nunca levanta erro."""
     try:
-        if _Display is not None:
-            _display = _Display()
-            return _display
-    except Exception:
-        _display = None
-    try:
-        if hasattr(ev3, "Display"):
-            _display = ev3.Display()
-    except Exception:
-        _display = None
-    return _display
+        out = subprocess.check_output(cmd, stderr=subprocess.STDOUT, timeout=timeout)
+        return out.decode("utf-8", "replace")
+    except Exception as e:
+        return str(e)
 
 
-def _init_font():
-    global _font, _line_height
-    if _font is not None:
-        return _font
+# =====================================================================
+# Tela (LCD 178x128)
+# =====================================================================
+def _load_font(size, bold=False):
     if _ImageFont is None:
         return None
-    try:
-        _font = _ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", _font_size)
-    except Exception:
+    nomes = ["DejaVuSans-Bold.ttf", "DejaVuSans.ttf"] if bold else ["DejaVuSans.ttf"]
+    for n in nomes:
         try:
-            _font = _ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", _font_size - 2)
-        except Exception:
-            try:
-                _font = _ImageFont.load_default()
-            except Exception:
-                _font = None
-    if _font is not None:
-        try:
-            _line_height = _font.getsize("Ag")[1] + 2
-        except Exception:
-            _line_height = 12
-    return _font
-
-
-def _display_lines(lines):
-    disp = _init_display()
-    if disp is None:
-        return
-    try:
-        font = _init_font()
-        draw = disp.draw
-        draw.rectangle((0, 0, disp.width, disp.height), fill="white")
-        y = 0
-        for line in lines:
-            if font is not None:
-                draw.text((0, y), line, fill="black", font=font)
-            else:
-                draw.text((0, y), line, fill="black")
-            y += _line_height
-        disp.update()
-    except Exception:
-        pass
-
-
-_debug_last_draw = 0
-_debug_last_event = None
-
-
-def _debug_lcd(event=None):
-    if not DEBUG_EVENT:
-        return
-    global _debug_last_draw, _debug_last_event
-    if event is not None:
-        _debug_last_event = event
-    now = time.time()
-    if now - _debug_last_draw < 0.1:
-        return
-    _debug_last_draw = now
-    if _debug_last_event is None:
-        return
-    _display_lines([
-        "DEBUG",
-        "t{} c{}".format(_debug_last_event.type, _debug_last_event.code),
-        "v{}".format(_debug_last_event.value),
-        "A {} V {}".format(int(throttle), int(turn)),
-    ])
-
-
-# =====================================================================
-# Botoes do EV3 e menu de selecao
-# =====================================================================
-def _read_buttons(btn):
-    if btn is None:
-        return set()
-    try:
-        if hasattr(btn, "process"):
-            btn.process()
-    except Exception:
-        pass
-    try:
-        pressed = btn.buttons_pressed
-        if callable(pressed):
-            pressed = pressed()
-        return set(pressed)
-    except Exception:
-        pass
-    pressed = set()
-    for name in ("left", "right", "up", "down", "enter", "backspace"):
-        try:
-            if getattr(btn, name):
-                pressed.add(name)
+            return _ImageFont.truetype("/usr/share/fonts/truetype/dejavu/" + n, size)
         except Exception:
             pass
-    return pressed
-
-
-def _get_ev3_buttons():
     try:
-        return ev3.Button()
-    except Exception as e:
-        print("Botoes do EV3 indisponiveis ({})".format(e))
+        return _ImageFont.load_default()
+    except Exception:
         return None
 
 
-def _device_label(device, max_len=12):
-    try:
-        name = device.name or _dev_path(device)
-    except Exception:
-        name = "device"
-    name = name.strip()
-    if len(name) > max_len:
-        return name[: max_len - 3] + "..."
-    return name
+class Tela(object):
+    def __init__(self):
+        self.disp = None
+        try:
+            if _Display is not None:
+                self.disp = _Display()
+            elif hasattr(ev3, "Display"):
+                self.disp = ev3.Display()
+        except Exception as e:
+            print("Sem display: {}".format(e))
+            self.disp = None
+        self.font = _load_font(12)
+        self.bold = _load_font(13, bold=True)
+        self.lh = self._h(self.font) + 4
+        self.th = self._h(self.bold) + 4
+
+    def _h(self, font):
+        try:
+            return font.getsize("Ag")[1]
+        except Exception:
+            return 10
+
+    def _w(self, text, font):
+        try:
+            return font.getsize(text)[0]
+        except Exception:
+            return len(text) * 6
+
+    def _fit(self, text, font, maxw):
+        if self._w(text, font) <= maxw:
+            return text
+        while text and self._w(text + "..", font) > maxw:
+            text = text[:-1]
+        return text + ".."
+
+    def _text(self, draw, xy, text, font, fill):
+        if font is not None:
+            draw.text(xy, text, fill=fill, font=font)
+        else:
+            draw.text(xy, text, fill=fill)
+
+    def _begin(self, titulo):
+        d = self.disp
+        draw = d.draw
+        draw.rectangle((0, 0, d.width, d.height), fill="white")
+        draw.rectangle((0, 0, d.width, self.th), fill="black")
+        self._text(draw, (3, 1), self._fit(titulo, self.bold, d.width - 6), self.bold, "white")
+        return draw
+
+    def _rodape(self, draw, rodape):
+        if not rodape:
+            return
+        d = self.disp
+        y = d.height - self.lh + 1
+        draw.line((0, y - 1, d.width, y - 1), fill="black")
+        self._text(draw, (2, y), self._fit(rodape, self.font, d.width - 4), self.font, "black")
+
+    def mostrar(self, titulo, linhas, rodape=None):
+        if self.disp is None:
+            print("[LCD] {} | {} | {}".format(titulo, " / ".join(linhas), rodape or ""))
+            return
+        try:
+            draw = self._begin(titulo)
+            y = self.th + 3
+            for ln in linhas:
+                self._text(draw, (3, y), self._fit(ln, self.font, self.disp.width - 6), self.font, "black")
+                y += self.lh
+            self._rodape(draw, rodape)
+            self.disp.update()
+        except Exception as e:
+            print("Erro desenhando: {}".format(e))
+
+    def menu(self, titulo, itens, sel, rodape=None):
+        if self.disp is None:
+            print("[LCD] {} | {} | {}".format(titulo, " ".join(
+                ("[" + t + "]") if i == sel else t for i, t in enumerate(itens)), rodape or ""))
+            return
+        try:
+            d = self.disp
+            draw = self._begin(titulo)
+            area = d.height - self.th - 2 - (self.lh if rodape else 0)
+            vis = max(1, area // self.lh)
+            top = 0
+            if sel >= vis:
+                top = sel - vis + 1
+            y = self.th + 2
+            for i in range(top, min(len(itens), top + vis)):
+                txt = self._fit(itens[i], self.font, d.width - 14)
+                if i == sel:
+                    draw.rectangle((0, y, d.width, y + self.lh), fill="black")
+                    self._text(draw, (2, y + 1), ">", self.font, "white")
+                    self._text(draw, (14, y + 1), txt, self.font, "white")
+                else:
+                    self._text(draw, (14, y + 1), txt, self.font, "black")
+                y += self.lh
+            self._rodape(draw, rodape)
+            d.update()
+        except Exception as e:
+            print("Erro desenhando menu: {}".format(e))
 
 
-def _select_with_ev3_buttons(devices, btn, timeout_s=30, preferred_idx=0):
-    if btn is None:
-        return _dev_path(devices[preferred_idx])
+# =====================================================================
+# Botoes do EV3
+# =====================================================================
+BOTOES = ("up", "down", "left", "right", "enter", "backspace")
 
-    idx = preferred_idx if 0 <= preferred_idx < len(devices) else 0
-    print("Use botoes do EV3: CIMA/BAIXO muda, ENTER confirma.")
 
-    def _show():
-        _display_lines([
-            "Controle",
-            "{}/{} {}".format(idx + 1, len(devices), _device_label(devices[idx])),
-            "CIMA/BAIXO",
-            "ENTER OK",
-        ])
+class Teclas(object):
+    """Le os botoes do bloco e devolve so quando um botao e APERTADO."""
 
-    # espera soltar o ENTER que abriu o menu
-    while "enter" in _read_buttons(btn):
-        time.sleep(0.05)
+    def __init__(self):
+        try:
+            self.btn = ev3.Button()
+        except Exception as e:
+            print("Botoes do EV3 indisponiveis ({})".format(e))
+            self.btn = None
+        self.prev = set()
 
-    _show()
-    start = time.time()
-    last_draw = 0
-    while time.time() - start < timeout_s:
-        now = time.time()
-        if now - last_draw > 0.2:   # redesenha para o brickman nao apagar
-            _show()
-            last_draw = now
-        pressed = _read_buttons(btn)
-        if "down" in pressed or "right" in pressed:
-            idx = (idx + 1) % len(devices)
-            _show()
+    def _pressed(self):
+        btn = self.btn
+        if btn is None:
+            return set()
+        try:
+            if hasattr(btn, "process"):
+                btn.process()
+        except Exception:
+            pass
+        try:
+            p = btn.buttons_pressed
+            if callable(p):
+                p = p()
+            return set(p)
+        except Exception:
+            pass
+        p = set()
+        for name in BOTOES:
+            try:
+                if getattr(btn, name):
+                    p.add(name)
+            except Exception:
+                pass
+        return p
+
+    def poll(self):
+        cur = self._pressed()
+        novo = cur - self.prev
+        self.prev = cur
+        for name in BOTOES:
+            if name in novo:
+                return name
+        return None
+
+    def wait(self, timeout=None):
+        fim = None if timeout is None else time.time() + timeout
+        while fim is None or time.time() < fim:
+            k = self.poll()
+            if k:
+                return k
+            time.sleep(0.03)
+        return None
+
+
+def lista(tela, teclas, titulo, itens, sel=0, rodape="CIMA/BAIXO  ENTER", status=None):
+    """Menu generico. Devolve o indice escolhido ou None (VOLTAR).
+    status(): funcao opcional que devolve o texto do rodape (atualiza sozinho)."""
+    ultimo = 0
+    while True:
+        if status is not None and time.time() - ultimo > 1.5:
+            rodape = status()
+            ultimo = time.time()
+        tela.menu(titulo, itens, sel, rodape)
+        k = teclas.wait(1.5 if status is not None else None)
+        if k in ("up", "left"):
+            sel = (sel - 1) % len(itens)
+        elif k in ("down", "right"):
+            sel = (sel + 1) % len(itens)
+        elif k == "enter":
             _beep()
-            time.sleep(0.25)
-            continue
-        if "up" in pressed or "left" in pressed:
-            idx = (idx - 1) % len(devices)
-            _show()
-            _beep()
-            time.sleep(0.25)
-            continue
-        if "enter" in pressed:
-            print("Selecionado: {} -> {}".format(_dev_path(devices[idx]), devices[idx].name))
-            _beep()
-            return _dev_path(devices[idx])
-        time.sleep(0.05)
+            return sel
+        elif k == "backspace":
+            return None
 
-    print("Timeout - usando dispositivo {}.".format(idx))
-    return _dev_path(devices[idx])
+
+def confirmar(tela, teclas, titulo, linhas):
+    tela.mostrar(titulo, linhas, "ENTER sim  VOLTAR nao")
+    while True:
+        k = teclas.wait()
+        if k == "enter":
+            return True
+        if k == "backspace":
+            return False
+
+
+def aviso(tela, teclas, titulo, linhas, tempo=None):
+    """Mostra uma mensagem ate apertar qualquer botao (ou passar 'tempo')."""
+    tela.mostrar(titulo, linhas, "Aperte um botao")
+    teclas.wait(tempo)
 
 
 # =====================================================================
@@ -317,9 +353,18 @@ CONTROLLER_KEYWORDS = [
     "nintendo", "switch", "pro controller",
     "gamepad", "controller", "joystick", "8bitdo",
 ]
-
-# dispositivos que NAO sao o controle principal
 BAD_KEYWORDS = ["brick", "speaker", "motion sensors", "touchpad", "keyboard", "mouse"]
+
+
+def _eh_ps4(nome):
+    n = (nome or "").lower()
+    return "wireless controller" in n or "ps4" in n or "dualshock 4" in n
+
+
+def _eh_ps3(nome):
+    n = (nome or "").lower()
+    return ("playstation" in n and "3" in n) or "ps3" in n or "sixaxis" in n \
+        or "shanwan" in n or "gasia" in n
 
 
 def _score_device(device):
@@ -330,8 +375,6 @@ def _score_device(device):
     score = 0
     if any(k in name for k in CONTROLLER_KEYWORDS):
         score += 50
-    if "playstation" in name or "ps3" in name or "sixaxis" in name:
-        score += 10
     if any(k in name for k in BAD_KEYWORDS):
         score -= 100
     try:
@@ -347,52 +390,40 @@ def _score_device(device):
     return score
 
 
-def _list_devices():
-    devs = []
+def achar_controle():
+    """Devolve (caminho, nome) do melhor controle conectado, ou (None, None)."""
+    melhor, nome, pts = None, None, -999
     for fn in evdev.list_devices():
         try:
-            devs.append(evdev.InputDevice(fn))
+            d = evdev.InputDevice(fn)
         except Exception:
-            pass
-    return devs
-
-
-def _close_all(devs, keep=None):
-    for d in devs:
-        if keep is not None and _dev_path(d) == keep:
             continue
         try:
-            d.close()
-        except Exception:
-            pass
-
-
-def _best_device(devs):
-    best_idx, best_score = 0, -999
-    for i, d in enumerate(devs):
-        s = _score_device(d)
-        if s > best_score:
-            best_idx, best_score = i, s
-    return best_idx, best_score
+            s = _score_device(d)
+            if s > pts:
+                melhor, nome, pts = _dev_path(d), d.name, s
+        finally:
+            try:
+                d.close()
+            except Exception:
+                pass
+    if pts >= 50:
+        return melhor, nome
+    return None, None
 
 
 def _detect_profile(device):
-    name = (device.name or "").lower()
+    name = device.name or ""
     try:
         keys = device.capabilities().get(ecodes.EV_KEY, [])
     except Exception:
         keys = []
-    is_ps3 = ("playstation" in name or "ps3" in name or "sixaxis" in name
-              or "shanwan" in name or "gasia" in name)
-    if is_ps3:
-        if BTN_SOUTH in keys:
-            return PROFILES["ps3"]
-        if 302 in keys:
+    if _eh_ps3(name):
+        if BTN_SOUTH not in keys and 302 in keys:
             return PROFILES["ps3_old"]
         return PROFILES["ps3"]
-    if "wireless controller" in name or "ps4" in name or "dualshock" in name:
-        # no mapeamento antigo existe o botao 306 (bolinha); no novo, nao
-        if 306 in keys:
+    if _eh_ps4(name):
+        if 306 in keys:  # botao 306 so existe no mapeamento antigo
             return PROFILES["ps4_old"]
         return PROFILES["ps4"]
     return PROFILES["generic"]
@@ -409,46 +440,12 @@ def _axis_ranges(device):
     return ranges
 
 
-def wait_for_controller(btn, first_run):
-    """Espera um controle aparecer. ENTER no EV3 abre o menu manual."""
-    print("Procurando controle...")
-    last_draw = 0
-    last_list = None
-    while True:
-        devs = _list_devices()
-        names = [d.name for d in devs]
-        if names != last_list:
-            print("Dispositivos: " + ", ".join(
-                "{} ({})".format(d.name, _dev_path(d)) for d in devs))
-            last_list = names
-
-        if devs:
-            idx, score = _best_device(devs)
-            found = score >= 50
-            if found and (AUTO_SELECT or not first_run):
-                path = _dev_path(devs[idx])
-                print("Controle encontrado: {} -> {}".format(devs[idx].name, path))
-                _close_all(devs)
-                return path
-            if found or "enter" in _read_buttons(btn):
-                path = _select_with_ev3_buttons(devs, btn, preferred_idx=idx)
-                _close_all(devs)
-                return path
-
-        _close_all(devs)
-        now = time.time()
-        if now - last_draw > 1.0:
-            _display_lines([
-                "Sem controle",
-                "PS3: aperte PS",
-                "ENTER = menu",
-            ])
-            last_draw = now
-        # checa o ENTER com frequencia enquanto espera
-        for _ in range(10):
-            if "enter" in _read_buttons(btn) and devs:
-                break
-            time.sleep(0.05)
+def _rotulo(nome):
+    if _eh_ps4(nome):
+        return "PS4"
+    if _eh_ps3(nome):
+        return "PS3"
+    return "Controle"
 
 
 # =====================================================================
@@ -456,141 +453,535 @@ def wait_for_controller(btn, first_run):
 # =====================================================================
 throttle = 0   # -1000..1000 (frente/tras)
 turn = 0       # -1000..1000 (direita positiva)
-running = True
+_motores = None
 
 
-class MotorThread(threading.Thread):
+class Motores(threading.Thread):
     def __init__(self):
         threading.Thread.__init__(self)
         self.daemon = True
         self.right_motor = ev3.LargeMotor(MOTOR_RIGHT)
         self.left_motor = ev3.LargeMotor(MOTOR_LEFT)
+        # ev3dev antigo nao da erro na criacao; checa se existe de verdade
+        for m in (self.right_motor, self.left_motor):
+            if hasattr(m, "connected") and not m.connected:
+                raise IOError("motor nao conectado")
         self._last = None
+        self._erro = False
 
-    def _stop(self):
+    def parar(self):
         for m in (self.right_motor, self.left_motor):
             try:
                 m.stop()
             except Exception:
                 pass
+        self._last = (0, 0)
 
     def run(self):
         print("Motores ativos!")
-        try:
-            while running:
+        while True:
+            try:
                 rs = dc_clamp(throttle - turn)
                 ls = dc_clamp(throttle + turn)
-                # so escreve no sysfs quando muda (economiza CPU do EV3)
-                if (rs, ls) != self._last:
+                if (rs, ls) != self._last:   # so escreve quando muda
                     if rs == 0 and ls == 0:
-                        self._stop()
+                        self.parar()
                     else:
                         self.right_motor.run_forever(speed_sp=rs)
                         self.left_motor.run_forever(speed_sp=ls)
                     self._last = (rs, ls)
-                time.sleep(0.02)
-        finally:
-            self._stop()
+                self._erro = False
+            except Exception as e:
+                if not self._erro:
+                    print("Erro nos motores: {}".format(e))
+                self._erro = True
+                self._last = None
+                time.sleep(0.5)
+            time.sleep(0.02)
+
+
+def garantir_motores(tela, teclas):
+    global _motores
+    if _motores is not None:
+        return True
+    try:
+        _motores = Motores()
+        _motores.start()
+        return True
+    except Exception as e:
+        print("Motores: {}".format(e))
+        _motores = None
+        aviso(tela, teclas, "Erro nos motores", [
+            "Ligue os motores", "grandes nas portas", "B (esq) e C (dir)"])
+        return False
+
+
+def parar_tudo():
+    global throttle, turn
+    throttle = 0
+    turn = 0
+    if _motores is not None:
+        _motores.parar()
 
 
 # =====================================================================
-# Loop de direcao
+# Dirigir
 # =====================================================================
-def drive(path):
-    """Le o controle ate desconectar ('disconnected') ou pedir para sair ('quit')."""
+def dirigir(path, tela, teclas):
+    """Le o controle. Devolve 'menu' (pediu para sair) ou 'desconectado'."""
     global throttle, turn
     try:
         dev = evdev.InputDevice(path)
     except Exception as e:
         print("Nao abriu {}: {}".format(path, e))
-        return "disconnected"
+        return "desconectado"
 
     profile = _detect_profile(dev)
     ranges = _axis_ranges(dev)
-    print("Usando {} [{}] perfil={} eixos={}".format(
-        dev.name, path, profile["label"], ranges))
-    if profile["label"].startswith("PS3"):
-        dica = ["Segure START", "1s = sair"]
-    elif profile["label"].startswith("PS4"):
-        dica = ["X = parar"]
-    else:
-        dica = []
-    _display_lines(["{} OK".format(profile["label"]), _device_label(dev, 16)] + dica)
+    print("Usando {} [{}] perfil={} eixos={}".format(dev.name, path, profile["label"], ranges))
+    tela.mostrar("{} conectado".format(profile["label"]), [
+        "Analogico esquerdo:",
+        "  frente / re / vira",
+        "",
+        profile["dica"],
+    ], "VOLTAR (EV3) = menu")
     _beep()
 
-    quit_pressed_at = None
+    quit_at = None
     try:
-        for event in dev.read_loop():
-            if DEBUG_EVENT:
-                print(repr(event))
-
-            if event.type == ecodes.EV_ABS:
-                if event.code == ecodes.ABS_X:
-                    v = scale_axis(event.value, ranges.get(ecodes.ABS_X))
-                    turn = -v if INVERT_TURN else v
-                elif event.code == ecodes.ABS_Y:
-                    # eixo Y do analogico e invertido (cima = valor menor)
-                    v = -scale_axis(event.value, ranges.get(ecodes.ABS_Y))
-                    throttle = -v if INVERT_THROTTLE else v
-
-            elif event.type == ecodes.EV_KEY and event.code in profile["quit"]:
-                hold = profile.get("hold", QUIT_HOLD_S)
-                if event.value == 1 and hold <= 0:
-                    print("Botao de sair pressionado. Parando.")
-                    return "quit"
-                if event.value == 1:
-                    quit_pressed_at = time.time()
-                elif event.value == 0 and quit_pressed_at is not None:
-                    if time.time() - quit_pressed_at >= hold:
-                        print("Botao de sair segurado. Encerrando.")
-                        return "quit"
-                    quit_pressed_at = None
-
-            _debug_lcd(event)
+        while True:
+            if teclas.poll() == "backspace":
+                return "menu"
+            r, _, _ = select.select([dev.fd], [], [], 0.05)
+            if not r:
+                continue
+            try:
+                eventos = list(dev.read())
+            except BlockingIOError:
+                continue
+            for event in eventos:
+                if DEBUG_EVENT:
+                    print(repr(event))
+                if event.type == ecodes.EV_ABS:
+                    if event.code == ecodes.ABS_X:
+                        v = scale_axis(event.value, ranges.get(ecodes.ABS_X))
+                        turn = -v if INVERT_TURN else v
+                    elif event.code == ecodes.ABS_Y:
+                        # eixo Y e invertido (cima = valor menor)
+                        v = -scale_axis(event.value, ranges.get(ecodes.ABS_Y))
+                        throttle = -v if INVERT_THROTTLE else v
+                elif event.type == ecodes.EV_KEY and event.code in profile["quit"]:
+                    if event.value == 1 and profile["hold"] <= 0:
+                        return "menu"
+                    if event.value == 1:
+                        quit_at = time.time()
+                    elif event.value == 0 and quit_at is not None:
+                        if time.time() - quit_at >= profile["hold"]:
+                            return "menu"
+                        quit_at = None
     except (OSError, IOError) as e:
         print("Controle desconectado ({})".format(e))
-        return "disconnected"
+        return "desconectado"
     finally:
-        # seguranca: para o robo antes de qualquer outra coisa
-        throttle = 0
-        turn = 0
+        parar_tudo()   # seguranca: robo parado antes de qualquer coisa
         try:
             dev.close()
         except Exception:
             pass
-    return "disconnected"
+
+
+def modo_dirigir(tela, teclas):
+    if not garantir_motores(tela, teclas):
+        return
+    msg = "Sem controle"
+    while True:
+        path, nome = achar_controle()
+        if path:
+            if dirigir(path, tela, teclas) == "menu":
+                _beep()
+                return
+            _beep()
+            msg = "Desconectado!"
+            continue
+        tela.mostrar("Dirigir", [msg, "", "Aperte PS no", "controle"], "VOLTAR = menu")
+        if teclas.wait(1.0) == "backspace":
+            return
+
+
+# =====================================================================
+# Bluetooth (bluetoothctl)
+# =====================================================================
+ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]|[\x01\x02]")
+PROMPT_RE = re.compile(r"^\[[^\]]*\]#\s*")
+MAC = r"([0-9A-Fa-f]{2}(?::[0-9A-Fa-f]{2}){5})"
+DEV_RE = re.compile(r"Device " + MAC + r" (.+)$")
+
+
+class Bt(object):
+    """Conversa com o bluetoothctl e responde 'yes' sozinho nas autorizacoes."""
+
+    def __init__(self):
+        self.p = subprocess.Popen(["bluetoothctl"], stdin=subprocess.PIPE,
+                                  stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        self.q = queue.Queue()
+        t = threading.Thread(target=self._ler)
+        t.daemon = True
+        t.start()
+
+    def _ler(self):
+        fd = self.p.stdout.fileno()
+        buf = ""
+        while True:
+            try:
+                data = os.read(fd, 1024)
+            except OSError:
+                break
+            if not data:
+                break
+            buf += data.decode("utf-8", "replace").replace("\r", "\n")
+            while "\n" in buf:
+                linha, buf = buf.split("\n", 1)
+                self._put(linha)
+            if "(yes/no)" in buf:      # pergunta sem quebra de linha
+                self._put(buf)
+                buf = ""
+        self.q.put(None)
+
+    def _put(self, linha):
+        linha = ANSI_RE.sub("", linha).strip()
+        while PROMPT_RE.match(linha):
+            linha = PROMPT_RE.sub("", linha, count=1).strip()
+        if not linha:
+            return
+        print("bt: " + linha)
+        if "(yes/no)" in linha:
+            self.cmd("yes")
+        self.q.put(linha)
+
+    def cmd(self, c):
+        print("bt> " + c)
+        try:
+            self.p.stdin.write((c + "\n").encode("utf-8"))
+            self.p.stdin.flush()
+        except Exception:
+            pass
+
+    def ler(self, timeout):
+        try:
+            return self.q.get(timeout=timeout)
+        except queue.Empty:
+            return ""
+
+    def esperar(self, teclas, timeout, achou):
+        """Le linhas ate achou(linha) devolver algo. Pode devolver
+        'cancelado' (VOLTAR), 'timeout' ou 'erro'."""
+        fim = time.time() + timeout
+        while time.time() < fim:
+            if teclas.poll() == "backspace":
+                return "cancelado"
+            linha = self.ler(0.1)
+            if linha is None:
+                return "erro"
+            if linha:
+                r = achou(linha)
+                if r is not None:
+                    return r
+        return "timeout"
+
+    def dispositivos(self):
+        """Lista (mac, nome) que o EV3 ja conhece."""
+        while self.ler(0.05):   # limpa a fila
+            pass
+        self.cmd("devices")
+        achados = []
+        fim = time.time() + 1.5
+        while time.time() < fim:
+            linha = self.ler(0.1)
+            if linha is None:
+                break
+            m = DEV_RE.search(linha or "")
+            if m and not linha.startswith("["):
+                achados.append((m.group(1).upper(), m.group(2)))
+        return achados
+
+    def fechar(self):
+        self.cmd("scan off")
+        self.cmd("quit")
+        try:
+            self.p.wait(timeout=3)
+        except Exception:
+            try:
+                self.p.kill()
+            except Exception:
+                pass
+
+
+def _bt_ligar():
+    # no ev3dev quem liga/desliga o Bluetooth e o connman
+    _run(["connmanctl", "enable", "bluetooth"])
+    _run(["rfkill", "unblock", "bluetooth"])
+    time.sleep(1)
+
+
+def _bt_abrir(tela):
+    tela.mostrar("Bluetooth", ["Ligando..."])
+    _bt_ligar()
+    try:
+        bt = Bt()
+    except Exception as e:
+        print("bluetoothctl: {}".format(e))
+        return None
+    bt.cmd("power on")
+    bt.cmd("agent NoInputNoOutput")
+    bt.cmd("default-agent")
+    time.sleep(0.5)
+    return bt
+
+
+def _falhou(tela, teclas, r, extra=None):
+    if r == "cancelado":
+        return
+    linhas = {"timeout": ["Demorou demais.", "Tente de novo."],
+              "erro": ["bluetoothctl", "parou de responder."]}.get(r, [str(r)])
+    aviso(tela, teclas, "Nao pareou", linhas + (extra or []))
+
+
+def parear_ps4(tela, teclas):
+    bt = _bt_abrir(tela)
+    if bt is None:
+        aviso(tela, teclas, "Erro", ["Bluetooth indisponivel"])
+        return
+    try:
+        # esquece PS4 antigos: se o controle pareou com outro aparelho,
+        # a chave velha impede a conexao
+        for mac, nome in bt.dispositivos():
+            if _eh_ps4(nome):
+                bt.cmd("remove " + mac)
+                time.sleep(0.5)
+
+        time.sleep(0.5)
+        while bt.ler(0.05):   # descarta respostas do 'remove'
+            pass
+        tela.mostrar("Parear PS4", [
+            "Segure SHARE + PS",
+            "ate a luz piscar",
+            "rapido (2 em 2).",
+            "Procurando...",
+        ], "VOLTAR cancela")
+        bt.cmd("scan on")
+
+        def _achou_ps4(linha):
+            # so vale o que a busca acabou de encontrar ([NEW] / [CHG])
+            if not (linha.startswith("[NEW]") or linha.startswith("[CHG]")):
+                return None
+            m = DEV_RE.search(linha)
+            if m:
+                nome = m.group(2)
+                for pref in ("Name: ", "Alias: "):
+                    if nome.startswith(pref):
+                        nome = nome[len(pref):]
+                if _eh_ps4(nome):
+                    return m.group(1).upper()
+            return None
+
+        mac = bt.esperar(teclas, 60, _achou_ps4)
+        if not re.match(MAC, mac):
+            _falhou(tela, teclas, mac, ["Segure SHARE + PS", "ate piscar rapido."])
+            return
+
+        tela.mostrar("Parear PS4", ["Achei o controle!", mac, "Pareando..."], "VOLTAR cancela")
+        bt.cmd("scan off")
+        time.sleep(1)
+        bt.cmd("pair " + mac)
+
+        def _fim_pair(linha):
+            if "Pairing successful" in linha or "AlreadyExists" in linha:
+                return "ok"
+            if "Failed to pair" in linha:
+                return "Falha no pareamento"
+            return None
+
+        r = bt.esperar(teclas, 30, _fim_pair)
+        if r != "ok":
+            _falhou(tela, teclas, r, ["Segure SHARE + PS", "e tente de novo."])
+            return
+
+        bt.cmd("trust " + mac)
+        time.sleep(0.5)
+        bt.cmd("connect " + mac)
+        bt.esperar(teclas, 10, lambda l: "ok" if ("Connection successful" in l
+                                                   or "Connected: yes" in l) else None)
+        _beep()
+        aviso(tela, teclas, "PS4 pareado!", [
+            "Pronto. Agora e so",
+            "apertar PS e usar",
+            "Dirigir no menu.",
+        ])
+    finally:
+        bt.fechar()
+
+
+def _ps3_conectado():
+    path, nome = achar_controle()
+    return path is not None and _eh_ps3(nome)
+
+
+def _esperar_ps3(teclas, presente, timeout, bt):
+    """Espera o PS3 aparecer (presente=True) ou sumir (False) no evdev."""
+    fim = time.time() + timeout
+    while time.time() < fim:
+        if teclas.poll() == "backspace":
+            return "cancelado"
+        if _ps3_conectado() == presente:
+            return "ok"
+        if bt.ler(0.3) is None:   # tambem responde as autorizacoes
+            return "erro"
+    return "timeout"
+
+
+def parear_ps3(tela, teclas):
+    bt = _bt_abrir(tela)
+    if bt is None:
+        aviso(tela, teclas, "Erro", ["Bluetooth indisponivel"])
+        return
+    try:
+        if not _ps3_conectado():
+            tela.mostrar("Parear PS3 (1/2)", [
+                "Ligue o controle",
+                "no USB do EV3",
+                "(cabo mini-USB).",
+            ], "VOLTAR cancela")
+            r = _esperar_ps3(teclas, True, 120, bt)
+            if r != "ok":
+                _falhou(tela, teclas, r)
+                return
+        _beep()
+        time.sleep(2)  # da tempo do EV3 gravar o endereco no controle
+
+        tela.mostrar("Parear PS3 (2/2)", [
+            "Tire o cabo USB",
+            "e aperte o botao PS",
+            "do controle.",
+        ], "VOLTAR cancela")
+        r = _esperar_ps3(teclas, False, 60, bt)
+        if r == "ok":
+            r = _esperar_ps3(teclas, True, 60, bt)
+        if r != "ok":
+            _falhou(tela, teclas, r, ["Ligue no USB e", "tente de novo."])
+            return
+
+        for mac, nome in bt.dispositivos():
+            if _eh_ps3(nome):
+                bt.cmd("trust " + mac)
+        time.sleep(0.5)
+        _beep()
+        aviso(tela, teclas, "PS3 pareado!", [
+            "Pronto. Agora e so",
+            "apertar PS e usar",
+            "Dirigir no menu.",
+        ])
+    finally:
+        bt.fechar()
+
+
+# =====================================================================
+# Info, Brickman e Desligar
+# =====================================================================
+def _ip():
+    out = _run(["hostname", "-I"]).split()
+    ips = [x for x in out if re.match(r"^\d+\.\d+\.\d+\.\d+$", x)]
+    return ips[0] if ips else "sem rede"
+
+
+def _bateria():
+    try:
+        return "{:.1f} V".format(ev3.PowerSupply().measured_volts)
+    except Exception:
+        return "?"
+
+
+def tela_info(tela, teclas):
+    while True:
+        path, nome = achar_controle()
+        tela.mostrar("Info", [
+            "IP: " + _ip(),
+            "Bateria: " + _bateria(),
+            "Controle: " + (_rotulo(nome) if path else "nenhum"),
+            "Login: robot / maker",
+        ], "Aperte um botao")
+        if teclas.wait(2.0):
+            return
+
+
+def abrir_brickman(tela, teclas):
+    if not confirmar(tela, teclas, "Brickman", [
+            "Abrir o menu normal", "do ev3dev?", "Para voltar aqui:", "reinicie o EV3."]):
+        return
+    tela.mostrar("Brickman", ["Abrindo..."])
+    parar_tudo()
+    # o servico tem Conflicts=brickman: o systemd encerra este programa
+    _run(["systemctl", "start", "brickman"], timeout=30)
+    time.sleep(5)
+    sys.exit(0)
+
+
+def desligar(tela, teclas):
+    if not confirmar(tela, teclas, "Desligar", ["Desligar o EV3?"]):
+        return
+    parar_tudo()
+    tela.mostrar("Desligando", ["Ate mais!"])
+    _run(["poweroff"])
+    time.sleep(30)
+
+
+# =====================================================================
+# Menu principal
+# =====================================================================
+def _status():
+    path, nome = achar_controle()
+    if path:
+        return "{} conectado".format(_rotulo(nome))
+    return "Sem controle"
 
 
 def main():
-    global running
-    btn = _get_ev3_buttons()
+    def _sigterm(signum, frame):
+        raise SystemExit(0)
+    signal.signal(signal.SIGTERM, _sigterm)
 
-    try:
-        motor_thread = MotorThread()
-    except Exception as e:
-        print("Erro nos motores (B e C conectados?): {}".format(e))
-        _display_lines(["Erro motor", "Confira B e C"])
-        time.sleep(3)
-        sys.exit(1)
-    motor_thread.start()
+    tela = Tela()
+    teclas = Teclas()
+    _beep()
 
-    first_run = True
+    opcoes = [
+        ("Dirigir", modo_dirigir),
+        ("Parear PS4", parear_ps4),
+        ("Parear PS3", parear_ps3),
+        ("Info (IP/bateria)", tela_info),
+        ("Brickman", abrir_brickman),
+        ("Desligar", desligar),
+    ]
+    sel = 0
     try:
         while True:
-            path = wait_for_controller(btn, first_run)
-            first_run = False
-            result = drive(path)
-            if result == "quit":
-                break
-            _beep()
-            _display_lines(["Desconectado", "PS3: aperte PS"])
-            time.sleep(1)
+            escolha = lista(tela, teclas, "Menu EV3",
+                            [o[0] for o in opcoes], sel, status=_status)
+            if escolha is None:
+                continue          # VOLTAR no menu principal nao faz nada
+            sel = escolha
+            try:
+                opcoes[escolha][1](tela, teclas)
+            except SystemExit:
+                raise
+            except Exception as e:
+                print("Erro em {}: {}".format(opcoes[escolha][0], e))
+                parar_tudo()
+                aviso(tela, teclas, "Erro", [str(e)[:60]])
     except KeyboardInterrupt:
-        print("Interrompido, parando...")
+        print("Interrompido.")
     finally:
-        running = False
-        time.sleep(0.3)
-        _display_lines(["Encerrado"])
+        parar_tudo()
+        tela.mostrar("Encerrado", [])
 
 
 if __name__ == "__main__":
