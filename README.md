@@ -12,7 +12,7 @@ Ligou o EV3, o menu aparece sozinho. Tudo pelos botoes do bloco:
 | Opcao | O que faz |
 |---|---|
 | **Dirigir** | usa o controle conectado (aperte PS no controle) |
-| **Parear PS4** | segure SHARE + PS no controle e o EV3 pareia sozinho |
+| **Parear controle** | qualquer controle Bluetooth (PS4 ou universal): ponha em modo pareamento, escolha na lista e aperte ENTER |
 | **Parear PS3** | ligue o controle no USB, tire o cabo e aperte PS |
 | **Info** | IP, bateria e controle conectado |
 | **Brickman** | abre o menu normal do ev3dev (reinicie o EV3 para voltar) |
@@ -27,7 +27,7 @@ O rodape do menu mostra se tem controle conectado.
 | Analogico esquerdo CIMA/BAIXO | frente / re |
 | Analogico esquerdo ESQ/DIR | vira |
 | **X** (PS4) | volta ao menu |
-| Segurar **START** 1 s e soltar (PS3) | volta ao menu |
+| Segurar **START** 1 s e soltar (PS3 e controles genericos) | volta ao menu |
 | **VOLTAR** no EV3 | volta ao menu |
 
 Se o controle desconectar, o robo para e espera ele voltar (aperte PS).
@@ -52,7 +52,7 @@ sudo apt-get install -y python3-ev3dev2 python3-evdev python3-pil
 
 ## 🎮 Parear pelo terminal/Brickman (alternativa)
 
-O jeito facil e pelo menu (**Parear PS4** / **Parear PS3**). Se preferir:
+O jeito facil e pelo menu (**Parear controle** / **Parear PS3**). Se preferir:
 
 ### PS4
 

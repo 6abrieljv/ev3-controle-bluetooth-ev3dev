@@ -8,13 +8,13 @@ Liga o EV3 e o menu aparece sozinho. Use so os botoes do bloco:
 
 Opcoes:
   Dirigir      - usa o controle (analogico esquerdo)
-  Parear PS4   - pareia um controle de PS4 novo (SHARE + PS)
+  Parear controle - pareia controle Bluetooth (PS4 ou universal)
   Parear PS3   - pareia um controle de PS3 (cabo USB uma vez)
   Info         - IP, bateria e controle conectado
   Brickman     - abre o menu normal do ev3dev
   Desligar     - desliga o EV3
 
-Dirigindo: PS4 = X volta ao menu | PS3 = segure START 1 s | EV3 = VOLTAR.
+Dirigindo: PS4 = X volta ao menu | outros = segure START 1 s | EV3 = VOLTAR.
 
 Compativel com Python 3.5 (ev3dev stretch): NAO usar f-strings.
 """
@@ -72,8 +72,8 @@ PROFILES = {
     # PS4 kernel antigo: Quad=304 X=305 O=306 Tri=307 (o 305 do codigo original)
     "ps4_old": {"label": "PS4", "quit": [305], "hold": 0, "dica": "X = menu"},
     # Xbox / genericos
-    "generic": {"label": "Controle", "quit": [BTN_EAST], "hold": 0,
-                "dica": "B = menu"},
+    "generic": {"label": "Controle", "quit": [BTN_START, BTN_SELECT],
+                "hold": QUIT_HOLD_S, "dica": "Segure START"},
 }
 
 
@@ -746,50 +746,125 @@ def _falhou(tela, teclas, r, extra=None):
     aviso(tela, teclas, "Nao pareou", linhas + (extra or []))
 
 
-def parear_ps4(tela, teclas):
+def _parece_controle(nome):
+    n = (nome or "").lower()
+    return any(k in n for k in CONTROLLER_KEYWORDS) or "game" in n or "pad" in n \
+        or "joy" in n or n.startswith("bt") or "bluetooth" in n
+
+
+def _sem_nome(mac, nome):
+    # aparelho sem nome aparece com o proprio MAC (ex: 7C-11-22-33-44-01)
+    return not nome or nome.replace("-", ":").upper() == mac
+
+
+def _escolher_aparelho(tela, teclas, bt, timeout=90):
+    """Busca aparelhos Bluetooth e deixa escolher na tela.
+    Devolve (mac, nome), 'cancelado', 'timeout' ou 'erro'."""
+    achados = {}          # mac -> nome
+    ordem = []
+    sel = 0
+    sel_mac = None        # aparelho que o usuario escolheu com as setas
+    mudou = True
+    fim = time.time() + timeout
+    while time.time() < fim:
+        k = teclas.poll()
+        if k == "backspace":
+            return "cancelado"
+
+        # controles primeiro, depois quem tem nome, por ultimo so-MAC
+        lista_ = sorted(ordem, key=lambda m: (
+            0 if _parece_controle(achados[m]) else (2 if _sem_nome(m, achados[m]) else 1),
+            ordem.index(m)))
+        if lista_:
+            # mantem a selecao no mesmo aparelho mesmo se a lista reordenar;
+            # sem o usuario mexer, fica no primeiro (o controle mais provavel)
+            sel = lista_.index(sel_mac) if sel_mac in lista_ else 0
+            if k in ("up", "left"):
+                sel = (sel - 1) % len(lista_)
+                sel_mac = lista_[sel]
+                mudou = True
+            elif k in ("down", "right"):
+                sel = (sel + 1) % len(lista_)
+                sel_mac = lista_[sel]
+                mudou = True
+            elif k == "enter":
+                mac = lista_[sel]
+                return mac, achados[mac]
+
+        if mudou:
+            if lista_:
+                tela.menu("Escolha o controle",
+                          [achados[m] if not _sem_nome(m, achados[m]) else m for m in lista_],
+                          sel, "ENTER pareia  VOLTAR")
+            else:
+                tela.mostrar("Parear controle", [
+                    "Ligue o controle em",
+                    "modo pareamento",
+                    "(PS4: SHARE + PS).",
+                    "Procurando...",
+                ], "VOLTAR cancela")
+            mudou = False
+
+        linha = bt.ler(0.05)
+        if linha is None:
+            return "erro"
+        if not linha:
+            continue
+        m = DEV_RE.search(linha)
+        if not m:
+            continue
+        mac = m.group(1).upper()
+        resto = m.group(2)
+        if linha.startswith("[DEL]"):
+            if mac in achados:
+                del achados[mac]
+                ordem.remove(mac)
+                if sel_mac == mac:
+                    sel_mac = None
+                mudou = True
+            continue
+        if linha.startswith("[NEW]"):
+            nome = resto
+        elif linha.startswith("[CHG]") and (resto.startswith("Name: ") or resto.startswith("Alias: ")):
+            nome = resto.split(": ", 1)[1]
+        else:
+            continue
+        if mac not in achados:
+            ordem.append(mac)
+            achados[mac] = nome
+            mudou = True
+        elif _sem_nome(mac, achados[mac]) and not _sem_nome(mac, nome):
+            achados[mac] = nome
+            mudou = True
+    return "timeout"
+
+
+def parear_controle(tela, teclas):
+    """Pareia qualquer controle Bluetooth (PS4 original ou universal)."""
     bt = _bt_abrir(tela)
     if bt is None:
         aviso(tela, teclas, "Erro", ["Bluetooth indisponivel"])
         return
     try:
-        # esquece PS4 antigos: se o controle pareou com outro aparelho,
+        # esquece controles antigos: se o controle pareou com outro aparelho,
         # a chave velha impede a conexao
         for mac, nome in bt.dispositivos():
-            if _eh_ps4(nome):
+            if _parece_controle(nome) and not _eh_ps3(nome):
                 bt.cmd("remove " + mac)
                 time.sleep(0.5)
-
         time.sleep(0.5)
         while bt.ler(0.05):   # descarta respostas do 'remove'
             pass
-        tela.mostrar("Parear PS4", [
-            "Segure SHARE + PS",
-            "ate a luz piscar",
-            "rapido (2 em 2).",
-            "Procurando...",
-        ], "VOLTAR cancela")
+
         bt.cmd("scan on")
-
-        def _achou_ps4(linha):
-            # so vale o que a busca acabou de encontrar ([NEW] / [CHG])
-            if not (linha.startswith("[NEW]") or linha.startswith("[CHG]")):
-                return None
-            m = DEV_RE.search(linha)
-            if m:
-                nome = m.group(2)
-                for pref in ("Name: ", "Alias: "):
-                    if nome.startswith(pref):
-                        nome = nome[len(pref):]
-                if _eh_ps4(nome):
-                    return m.group(1).upper()
-            return None
-
-        mac = bt.esperar(teclas, 60, _achou_ps4)
-        if not re.match(MAC, mac):
-            _falhou(tela, teclas, mac, ["Segure SHARE + PS", "ate piscar rapido."])
+        r = _escolher_aparelho(tela, teclas, bt)
+        if not isinstance(r, tuple):
+            _falhou(tela, teclas, r, ["Ligue o modo", "pareamento do controle."])
             return
+        mac, nome = r
 
-        tela.mostrar("Parear PS4", ["Achei o controle!", mac, "Pareando..."], "VOLTAR cancela")
+        tela.mostrar("Pareando", [nome if not _sem_nome(mac, nome) else "", mac,
+                                  "Aguarde..."], "VOLTAR cancela")
         bt.cmd("scan off")
         time.sleep(1)
         bt.cmd("pair " + mac)
@@ -803,7 +878,7 @@ def parear_ps4(tela, teclas):
 
         r = bt.esperar(teclas, 30, _fim_pair)
         if r != "ok":
-            _falhou(tela, teclas, r, ["Segure SHARE + PS", "e tente de novo."])
+            _falhou(tela, teclas, r, ["Ponha o controle em", "pareamento de novo."])
             return
 
         bt.cmd("trust " + mac)
@@ -812,9 +887,10 @@ def parear_ps4(tela, teclas):
         bt.esperar(teclas, 10, lambda l: "ok" if ("Connection successful" in l
                                                    or "Connected: yes" in l) else None)
         _beep()
-        aviso(tela, teclas, "PS4 pareado!", [
-            "Pronto. Agora e so",
-            "apertar PS e usar",
+        aviso(tela, teclas, "Controle pareado!", [
+            "Pronto. Da proxima",
+            "vez e so ligar o",
+            "controle e usar",
             "Dirigir no menu.",
         ])
     finally:
@@ -955,7 +1031,7 @@ def main():
 
     opcoes = [
         ("Dirigir", modo_dirigir),
-        ("Parear PS4", parear_ps4),
+        ("Parear controle", parear_controle),
         ("Parear PS3", parear_ps3),
         ("Info (IP/bateria)", tela_info),
         ("Brickman", abrir_brickman),
