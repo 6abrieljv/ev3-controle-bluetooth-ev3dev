@@ -7,7 +7,7 @@ Write-Host "Deploying files to $User@$HostName..."
 Write-Host "Obs: a senha sera solicitada pelo ssh/scp."
 
 # Paths
-$files = @("start_main.sh","ev3main.service","main.py")
+$files = @("start_main.sh","ev3main.service","main.py","testar_controle.py")
 foreach ($f in $files) {
     if (-not (Test-Path $f)) {
         Write-Error "Local file $f not found. Run this from project folder."
@@ -24,6 +24,8 @@ if ($LASTEXITCODE -ne 0) { Write-Error "scp failed with exit code $LASTEXITCODE"
 
 # Remote commands to setup files and service
 $remoteCmd = @'
+# remove CRLF do Windows (evita "^M: bad interpreter")
+sed -i 's/\r$//' /home/$USER/start_main.sh /home/$USER/main.py /home/$USER/testar_controle.py /home/$USER/ev3main.service
 # move service unit
 if [ -f /home/$USER/ev3main.service ]; then
   sudo mv /home/$USER/ev3main.service /etc/systemd/system/ev3main.service
@@ -36,7 +38,7 @@ fi
 # reload and enable service
 sudo systemctl daemon-reload
 sudo systemctl enable ev3main.service
-sudo systemctl start ev3main.service
+sudo systemctl restart ev3main.service
 sudo systemctl status ev3main.service --no-pager
 '@
 
@@ -46,4 +48,4 @@ $remoteCmd = $remoteCmd -replace '\$USER', $User
 Write-Host "Running remote setup commands..."
 ssh -t $User@$HostName $remoteCmd
 
-Write-Host "Done. If prompted, enter the SSH password for $User@$Host."
+Write-Host "Done. If prompted, enter the SSH password for $User@$HostName."

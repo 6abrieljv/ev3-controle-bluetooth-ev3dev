@@ -1,0 +1,6 @@
+# Arquivos que rodam no EV3 precisam de fim de linha LF (Linux),
+# senao o sh/systemd quebra com "^M: bad interpreter".
+*.sh      text eol=lf
+*.py      text eol=lf
+*.service text eol=lf
+*.ps1     text eol=crlf
