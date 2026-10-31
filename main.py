@@ -10,6 +10,7 @@ Opcoes:
   Dirigir      - usa o controle (analogico esquerdo)
   Parear controle - pareia controle Bluetooth (PS4 ou universal)
   Parear PS3   - pareia um controle de PS3 (cabo USB uma vez)
+  Rede         - mostra o IP e conecta Wi-Fi salvo ou o Bluetooth do PC
   Info         - IP, bateria e controle conectado
   Brickman     - abre o menu normal do ev3dev
   Desligar     - desliga o EV3
@@ -998,6 +999,81 @@ def _bateria():
         return "?"
 
 
+# =====================================================================
+# Rede (connman): mostra IP e conecta Wi-Fi salvo / Bluetooth do PC
+# =====================================================================
+def _servicos_rede():
+    """Le 'connmanctl services'. Devolve [(id, nome, estado)]."""
+    out = _run(["connmanctl", "services"], timeout=15)
+    servicos = []
+    for linha in out.splitlines():
+        if len(linha) < 5 or not linha.strip():
+            continue
+        partes = linha[4:].rsplit(None, 1)
+        if len(partes) != 2:
+            continue
+        nome, sid = partes[0].strip(), partes[1].strip()
+        if not re.match(r"^(wifi|bluetooth|ethernet|gadget)_", sid):
+            continue
+        flags = linha[:4]
+        if "O" in flags:
+            estado = "online"
+        elif "R" in flags:
+            estado = "ligado"
+        else:
+            estado = ""
+        servicos.append((sid, nome or sid, estado))
+    return servicos
+
+
+def _tipo(sid):
+    for pref, nome in (("bluetooth_", "BT"), ("wifi_", "WiFi"),
+                       ("gadget_", "USB"), ("ethernet_", "Cabo")):
+        if sid.startswith(pref):
+            return nome
+    return "?"
+
+
+def tela_rede(tela, teclas):
+    tela.mostrar("Rede", ["Ligando Bluetooth", "e Wi-Fi..."])
+    for tech in ("bluetooth", "wifi", "gadget"):
+        _run(["connmanctl", "enable", tech])
+    _run(["connmanctl", "scan", "wifi"], timeout=20)
+    sel = 0
+    while True:
+        servicos = _servicos_rede()
+        if not servicos:
+            aviso(tela, teclas, "Rede " + _ip(), [
+                "Nada encontrado.",
+                "Bluetooth do PC:",
+                "pareie o PC com o",
+                "EV3 primeiro."])
+            return
+        itens = ["{} {}{}".format(_tipo(sid), nome, " *" if est else "")
+                 for sid, nome, est in servicos]
+        escolha = lista(tela, teclas, "IP " + _ip(), itens, min(sel, len(itens) - 1),
+                        "* = conectado  ENTER")
+        if escolha is None:
+            return
+        sel = escolha
+        sid, nome, est = servicos[escolha]
+        if est:
+            if confirmar(tela, teclas, nome[:20], ["Ja conectado.", "Desconectar?"]):
+                _run(["connmanctl", "disconnect", sid], timeout=20)
+            continue
+        tela.mostrar("Conectando", [nome, "Aguarde..."])
+        out = _run(["connmanctl", "connect", sid], timeout=40)
+        _run(["connmanctl", "config", sid, "--autoconnect", "yes"])
+        print("connmanctl connect {}: {}".format(sid, out.strip()))
+        time.sleep(2)
+        if "Connected" in out or "Already connected" in out:
+            aviso(tela, teclas, "Conectado!", [nome, "IP: " + _ip(),
+                                              "ssh robot@" + _ip()])
+        else:
+            aviso(tela, teclas, "Nao conectou", [nome, out.strip()[:40],
+                                                 "Wi-Fi novo: conecte", "pelo Brickman 1 vez."])
+
+
 def tela_info(tela, teclas):
     while True:
         path, nome = achar_controle()
@@ -1012,14 +1088,19 @@ def tela_info(tela, teclas):
 
 
 def abrir_brickman(tela, teclas):
+    global _brickman_pedido
     if not confirmar(tela, teclas, "Brickman", [
             "Abrir o menu normal", "do ev3dev?", "Para voltar aqui:", "reinicie o EV3."]):
         return
+    _brickman_pedido = True
     tela.mostrar("Brickman", ["Abrindo..."])
     parar_tudo()
-    # o servico tem Conflicts=brickman: o systemd encerra este programa
-    _run(["systemctl", "start", "brickman"], timeout=30)
-    time.sleep(5)
+    _console_grafico(False)
+    print("Usuario abriu o brickman pelo menu.")
+    # para este servico (senao o Restart=always traz ele de volta)
+    _run(["systemctl", "--no-block", "start", "brickman.service"])
+    _run(["systemctl", "--no-block", "stop", "ev3main.service"])
+    time.sleep(30)
     sys.exit(0)
 
 
@@ -1035,6 +1116,23 @@ def desligar(tela, teclas):
 # =====================================================================
 # Menu principal
 # =====================================================================
+_brickman_pedido = False   # True quando o usuario escolheu abrir o brickman
+
+
+def _vigiar_brickman():
+    """Se algo abrir o brickman por tras, ele briga pela tela. Fecha ele.
+    Roda numa thread separada para nao travar os botoes do menu."""
+    while True:
+        time.sleep(5)
+        if _brickman_pedido:
+            return
+        if _run(["systemctl", "is-active", "brickman.service"]).strip() == "active":
+            print("brickman estava rodando por fora; parando ele.")
+            _run(["systemctl", "--no-block", "stop", "brickman.service"])
+            time.sleep(2)
+            _console_grafico(True)
+
+
 def _status():
     path, nome = achar_controle()
     if path:
@@ -1049,13 +1147,17 @@ def main():
 
     tela = Tela()
     teclas = Teclas()
+    vigia = threading.Thread(target=_vigiar_brickman)
+    vigia.daemon = True
+    vigia.start()
     _beep()
 
     opcoes = [
         ("Dirigir", modo_dirigir),
         ("Parear controle", parear_controle),
         ("Parear PS3", parear_ps3),
-        ("Info (IP/bateria)", tela_info),
+        ("Rede (IP/Bluetooth PC)", tela_rede),
+        ("Info (bateria)", tela_info),
         ("Brickman", abrir_brickman),
         ("Desligar", desligar),
     ]

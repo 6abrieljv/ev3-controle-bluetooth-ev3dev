@@ -14,11 +14,13 @@ Ligou o EV3, o menu aparece sozinho. Tudo pelos botoes do bloco:
 | **Dirigir** | usa o controle conectado (aperte PS no controle) |
 | **Parear controle** | qualquer controle Bluetooth (PS4 ou universal): ponha em modo pareamento, escolha na lista e aperte ENTER |
 | **Parear PS3** | ligue o controle no USB, tire o cabo e aperte PS |
+| **Rede** | mostra o IP e conecta o Wi-Fi salvo ou o Bluetooth do PC (para usar o ssh) |
 | **Info** | IP, bateria e controle conectado |
 | **Brickman** | abre o menu normal do ev3dev (reinicie o EV3 para voltar) |
 | **Desligar** | desliga o EV3 |
 
-O rodape do menu mostra se tem controle conectado.
+O rodape do menu mostra se tem controle conectado. Se o programa parar por
+qualquer motivo, o systemd abre ele de novo em 3 segundos.
 
 ## 🎮 Dirigindo
 

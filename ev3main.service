@@ -1,19 +1,20 @@
 [Unit]
 Description=EV3 main controller
-After=multi-user.target bluetooth.target
-Conflicts=brickman.service
-Before=brickman.service
+# sobe depois do brickman (se ele estiver ativo) e fecha ele
+After=multi-user.target bluetooth.target connman.service brickman.service
 Wants=bluetooth.target
 
 [Service]
 Type=simple
-# roda como root: precisa parear Bluetooth, abrir o brickman e desligar
+# roda como root: precisa parear Bluetooth, mexer na rede e desligar
 User=root
 Environment=PYTHONUNBUFFERED=1
 WorkingDirectory=/home/robot
+ExecStartPre=-/bin/systemctl --no-block stop brickman.service
 ExecStart=/home/robot/start_main.sh
-Restart=on-failure
-RestartSec=5
+# volta sozinho se parar por qualquer motivo
+Restart=always
+RestartSec=3
 
 [Install]
 WantedBy=multi-user.target
