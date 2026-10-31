@@ -1,8 +1,12 @@
 [Unit]
-Description=EV3 main controller
-# sobe depois do brickman (se ele estiver ativo) e fecha ele
-After=multi-user.target bluetooth.target connman.service brickman.service
-Wants=bluetooth.target
+Description=EV3 menu (controle por gamepad)
+# Sobe logo no comeco do boot: so espera o disco e os dispositivos (udev).
+# Rede, Bluetooth e o resto do sistema continuam subindo por baixo.
+DefaultDependencies=no
+After=local-fs.target systemd-udev-trigger.service
+Wants=systemd-udev-trigger.service
+Conflicts=shutdown.target
+Before=shutdown.target
 
 [Service]
 Type=simple
@@ -10,6 +14,8 @@ Type=simple
 User=root
 Environment=PYTHONUNBUFFERED=1
 WorkingDirectory=/home/robot
+# prioridade maior que o resto do boot, para o menu abrir mais rapido
+Nice=-10
 ExecStartPre=-/bin/systemctl --no-block stop brickman.service
 ExecStart=/home/robot/start_main.sh
 # volta sozinho se parar por qualquer motivo
@@ -17,4 +23,4 @@ Restart=always
 RestartSec=3
 
 [Install]
-WantedBy=multi-user.target
+WantedBy=sysinit.target

@@ -162,6 +162,29 @@ def _console_grafico(ligar):
         print("Console: {}".format(e))
 
 
+SPLASH = "/home/robot/.ev3_splash"
+
+
+def _salvar_splash(tela):
+    """Desenha a tela 'Carregando' e guarda uma copia exata do LCD.
+    No proximo boot o start_main.sh joga essa copia na tela na hora,
+    antes do Python terminar de carregar."""
+    if tela.disp is None:
+        return
+    try:
+        if os.path.exists(SPLASH) and \
+                os.path.getmtime(SPLASH) >= os.path.getmtime(os.path.abspath(__file__)):
+            return
+        tela.mostrar("Menu EV3", ["", "Carregando...", "", "Aguarde"])
+        with open("/dev/fb0", "rb") as fb:
+            dados = fb.read()
+        with open(SPLASH, "wb") as f:
+            f.write(dados)
+        print("Tela de carregando salva ({} bytes).".format(len(dados)))
+    except Exception as e:
+        print("Splash: {}".format(e))
+
+
 class Tela(object):
     def __init__(self):
         self.disp = None
@@ -1146,6 +1169,7 @@ def main():
     signal.signal(signal.SIGTERM, _sigterm)
 
     tela = Tela()
+    _salvar_splash(tela)
     teclas = Teclas()
     vigia = threading.Thread(target=_vigiar_brickman)
     vigia.daemon = True

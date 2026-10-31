@@ -40,7 +40,8 @@ fi
 sudo systemctl disable brickman.service
 # reload and enable service
 sudo systemctl daemon-reload
-sudo systemctl enable ev3main.service
+# reenable: refaz os links (o servico agora sobe no comeco do boot)
+sudo systemctl reenable ev3main.service
 sudo systemctl restart ev3main.service
 sudo systemctl status ev3main.service --no-pager
 '@
