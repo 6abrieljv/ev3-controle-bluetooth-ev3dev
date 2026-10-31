@@ -5,9 +5,9 @@ Controle do EV3 (ev3dev) por gamepad Bluetooth ou USB.
 
 Suporta PS3 (DualShock 3 / Sixaxis), PS4, Xbox e controles genericos.
 - Analogico esquerdo: CIMA/BAIXO acelera, ESQ/DIR vira (arcade drive).
-- Encerrar: segure o botao de sair por 1 s e solte (PS3/PS4: START).
+- Encerrar: PS4 = aperte X (igual ao original) | PS3 = segure START 1 s e solte.
 - Se o controle desconectar, os motores param e o programa espera ele voltar
-  (no PS3 e so apertar o botao PS de novo).
+  (e so apertar o botao PS de novo).
 
 Compativel com Python 3.5 (ev3dev stretch): NAO usar f-strings.
 """
@@ -54,16 +54,23 @@ PROFILES = {
     # X=304  O=305  Triangulo=307  Quadrado=308  L1=310 R1=311
     # L2=312 R2=313 SELECT=314 START=315 PS=316
     # Analogico direito: ABS_RX=3 / ABS_RY=4 ; gatilhos L2/R2: ABS_Z=2 / ABS_RZ=5
-    "ps3": {"label": "PS3", "quit": [BTN_START]},
+    "ps3": {"label": "PS3", "quit": [BTN_START], "hold": QUIT_HOLD_S},
 
     # PS3 em kernels antigos (ev3dev jessie): X=302 O=301 Triangulo=300
     # Quadrado=303 SELECT=288 START=291 ; analogico direito ABS_Z=2 / ABS_RZ=5
-    "ps3_old": {"label": "PS3 (antigo)", "quit": [291]},
+    "ps3_old": {"label": "PS3 (antigo)", "quit": [291], "hold": QUIT_HOLD_S},
 
-    "ps4": {"label": "PS4", "quit": [BTN_START]},
+    # PS4 igual ao repositorio original: apertou X, para na hora.
+    # Kernel novo (stretch): X=304 O=305 Triangulo=307 Quadrado=308
+    #   SHARE=314 OPTIONS=315 PS=316
+    "ps4": {"label": "PS4", "quit": [BTN_SOUTH], "hold": 0},
+
+    # Kernel antigo: Quadrado=304 X=305 O=306 Triangulo=307 (o 305 do codigo
+    # original era o X por causa deste mapeamento)
+    "ps4_old": {"label": "PS4 (antigo)", "quit": [305], "hold": 0},
 
     # Xbox / genericos: mantem o botao 305 do codigo original
-    "generic": {"label": "Generico", "quit": [BTN_EAST]},
+    "generic": {"label": "Generico", "quit": [BTN_EAST], "hold": 0},
 }
 
 
@@ -384,6 +391,9 @@ def _detect_profile(device):
             return PROFILES["ps3_old"]
         return PROFILES["ps3"]
     if "wireless controller" in name or "ps4" in name or "dualshock" in name:
+        # no mapeamento antigo existe o botao 306 (bolinha); no novo, nao
+        if 306 in keys:
+            return PROFILES["ps4_old"]
         return PROFILES["ps4"]
     return PROFILES["generic"]
 
@@ -499,15 +509,13 @@ def drive(path):
     ranges = _axis_ranges(dev)
     print("Usando {} [{}] perfil={} eixos={}".format(
         dev.name, path, profile["label"], ranges))
-    _display_lines([
-        "{} OK".format(profile["label"]),
-        _device_label(dev, 16),
-        "Segure START",
-        "1s = sair",
-    ] if profile["label"].startswith(("PS3", "PS4")) else [
-        "{} OK".format(profile["label"]),
-        _device_label(dev, 16),
-    ])
+    if profile["label"].startswith("PS3"):
+        dica = ["Segure START", "1s = sair"]
+    elif profile["label"].startswith("PS4"):
+        dica = ["X = parar"]
+    else:
+        dica = []
+    _display_lines(["{} OK".format(profile["label"]), _device_label(dev, 16)] + dica)
     _beep()
 
     quit_pressed_at = None
@@ -526,10 +534,14 @@ def drive(path):
                     throttle = -v if INVERT_THROTTLE else v
 
             elif event.type == ecodes.EV_KEY and event.code in profile["quit"]:
+                hold = profile.get("hold", QUIT_HOLD_S)
+                if event.value == 1 and hold <= 0:
+                    print("Botao de sair pressionado. Parando.")
+                    return "quit"
                 if event.value == 1:
                     quit_pressed_at = time.time()
                 elif event.value == 0 and quit_pressed_at is not None:
-                    if time.time() - quit_pressed_at >= QUIT_HOLD_S:
+                    if time.time() - quit_pressed_at >= hold:
                         print("Botao de sair segurado. Encerrando.")
                         return "quit"
                     quit_pressed_at = None

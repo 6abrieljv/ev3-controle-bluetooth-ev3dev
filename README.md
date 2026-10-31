@@ -10,7 +10,8 @@ desconectar, para os motores e espera ele voltar.
 |---|---|
 | Analogico esquerdo CIMA/BAIXO | frente / re |
 | Analogico esquerdo ESQ/DIR | vira |
-| Segurar **START** 1 s e soltar (PS3/PS4) | encerra o programa |
+| **X** (PS4), igual ao original | encerra o programa |
+| Segurar **START** 1 s e soltar (PS3) | encerra o programa |
 
 Motores: **B** = esquerdo, **C** = direito (mude `MOTOR_LEFT`/`MOTOR_RIGHT` no
 `main.py`). Se andar ao contrario, use `INVERT_THROTTLE` / `INVERT_TURN`.
@@ -29,6 +30,33 @@ Instalar no EV3:
 sudo apt-get update
 sudo apt-get install -y python3-ev3dev2 python3-evdev python3-pil
 ```
+
+## 🎮 Parear o controle de PS4 (so na primeira vez)
+
+O PS4 pareia pelo Bluetooth normal:
+
+1. Se o programa estiver rodando: `sudo systemctl start brickman`
+2. No controle, segure **SHARE + PS** ate a luz piscar rapido (duas piscadas
+   seguidas).
+3. No EV3: **Wireless and Networks > Bluetooth** (Powered marcado) > **Start
+   Scan** > escolha **Wireless Controller** > **Pair**.
+4. Reinicie o EV3 (`sudo reboot`). Depois e so apertar **PS** no controle.
+
+Pelo terminal:
+```
+sudo systemctl stop ev3main.service
+bluetoothctl
+  power on
+  agent on
+  default-agent
+  scan on                    # com o controle em SHARE+PS
+  pair XX:XX:XX:XX:XX:XX     # MAC do "Wireless Controller"
+  trust XX:XX:XX:XX:XX:XX
+  connect XX:XX:XX:XX:XX:XX
+  quit
+sudo systemctl start ev3main.service
+```
+No cabo USB tambem funciona, sem parear.
 
 ## 🎮 Parear o controle de PS3 (so na primeira vez)
 
